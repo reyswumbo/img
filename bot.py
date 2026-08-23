@@ -171,7 +171,12 @@ def build_view_keyboard() -> InlineKeyboardMarkup:
             if len(label) > 40:
                 label = label[:37] + "..."
             rows.append(
-                [InlineKeyboardButton(text=label, callback_data=f"view|{kind}|{idx}")]
+                [
+                    InlineKeyboardButton(
+                        text=label,
+                        callback_data=f"view|{kind}|{idx}|{fname_hash(p.name)}",
+                    )
+                ]
             )
     if not rows:
         return None
