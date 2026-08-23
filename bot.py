@@ -64,6 +64,11 @@ def get_token() -> str | None:
             line = line.strip()
             if line.startswith("BOT_TOKEN="):
                 return line.split("=", 1)[1].strip().strip('"').strip("'")
+    token_file = Path("/root/tokentelegram.txt")
+    if token_file.exists():
+        content = token_file.read_text(encoding="utf-8").strip()
+        if content:
+            return content
     return None
 
 
@@ -362,8 +367,8 @@ def main() -> None:
     if not token:
         raise SystemExit(
             "BOT_TOKEN tidak ditemukan.\n"
-            "Set lewat environment variable BOT_TOKEN atau file .env berisi:\n"
-            "BOT_TOKEN=123456:ABC-DEF..."
+            "Set lewat environment variable BOT_TOKEN, file .env berisi "
+            "BOT_TOKEN=..., atau file /root/tokentelegram.txt."
         )
     for d in (DIR_BW, DIR_COLOR, TMP_DIR):
         d.mkdir(exist_ok=True)

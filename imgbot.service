@@ -9,7 +9,7 @@ WorkingDirectory=/root/img
 ExecStart=/usr/bin/python3 /root/img/bot.py
 Restart=always
 RestartSec=5
-Environment=BOT_TOKEN=GANTI_DENGAN_TOKEN_BOT_KAMU
+# Token dibaca otomatis dari /root/tokentelegram.txt
 Environment=GIT_BRANCH=main
 
 [Install]
