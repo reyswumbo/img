@@ -215,8 +215,20 @@ async def view_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def pick_commit_word() -> str:
+    color_changes = run_git(["status", "--porcelain", "--", "color"]).stdout.strip()
+    bw_changes = run_git(
+        ["status", "--porcelain", "--", "hitam-putih"]
+    ).stdout.strip()
+    if color_changes and not bw_changes:
+        return "coloring"
+    if bw_changes and not color_changes:
+        return "sketsa"
+    return random.choice(COMMIT_WORDS)
+
+
 def gen_commit_msg() -> str:
-    w1 = random.choice(COMMIT_WORDS)
+    w1 = pick_commit_word()
     w2 = "".join(random.choices(string.ascii_lowercase, k=random.randint(6, 7)))
     return f"{w1}_{w2}"
 
