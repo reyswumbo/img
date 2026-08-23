@@ -1,0 +1,378 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import random
+import re
+import shutil
+import string
+import subprocess
+import uuid
+from pathlib import Path
+
+from telegram import ReplyKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
+
+BASE = Path(__file__).resolve().parent
+DIR_BW = BASE / "hitam-putih"
+DIR_COLOR = BASE / "color"
+TMP_DIR = BASE / ".tmp_uploads"
+BRANCH = os.environ.get("GIT_BRANCH", "main")
+
+MENU, WAIT_IMAGE, WAIT_NAME = range(3)
+
+BTN_BW = "\U0001F5A4 Hitam-Putih"
+BTN_COLOR = "\U0001F3A8 Coloring"
+BTN_LIST = "\U0001F4CB List Upload"
+BTN_PUSH = "\u2B06\uFE0F Push GitHub"
+BTN_HOME = "\U0001F3E0 Menu"
+
+IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic")
+
+COMMIT_WORDS = [
+    "update", "tambah", "sync", "refresh", "upload",
+    "perbarui", "rapiin", "revisi", "simpan", "backup",
+]
+
+menu_kb = ReplyKeyboardMarkup(
+    [[BTN_BW, BTN_COLOR], [BTN_LIST, BTN_PUSH], [BTN_HOME]],
+    resize_keyboard=True,
+)
+home_kb = ReplyKeyboardMarkup([[BTN_HOME]], resize_keyboard=True)
+
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s", level=logging.INFO
+)
+log = logging.getLogger("imgbot")
+
+
+def get_token() -> str | None:
+    token = os.environ.get("BOT_TOKEN")
+    if token:
+        return token.strip()
+    env = BASE / ".env"
+    if env.exists():
+        for line in env.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("BOT_TOKEN="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+def fmt_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+
+
+def sanitize_filename(name: str) -> str:
+    name = name.strip().replace(" ", "-")
+    name = re.sub(r"[^A-Za-z0-9._\-]", "", name)
+    name = re.sub(r"\.{2,}", ".", name).lstrip(".")
+    return name[:80]
+
+
+def ensure_ext(filename: str, original: str) -> str:
+    if Path(filename).suffix:
+        return filename
+    orig_ext = Path(original).suffix or ".jpg"
+    return filename + orig_ext.lower()
+
+
+def unique_path(folder: Path, filename: str) -> Path:
+    target = folder / filename
+    if not target.exists():
+        return target
+    stem, suffix = target.stem, target.suffix
+    for i in range(1, 1000):
+        candidate = folder / f"{stem}-{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return folder / f"{stem}-{uuid.uuid4().hex[:6]}{suffix}"
+
+
+def gen_commit_msg() -> str:
+    w1 = random.choice(COMMIT_WORDS)
+    w2 = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"{w1}-img-{w2}"
+
+
+def run_git(args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=BASE, capture_output=True, text=True)
+
+
+def do_push() -> str:
+    run_git(["add", "-A"])
+    status = run_git(["status", "--porcelain"]).stdout.strip()
+    if not status:
+        return "\u2139\uFE0F Tidak ada perubahan baru untuk di-push."
+    msg = gen_commit_msg()
+    commit = run_git(["commit", "-m", msg])
+    if commit.returncode != 0:
+        return f"\u274C Commit gagal:\n{commit.stderr.strip()[-800:]}"
+    push = run_git(["push", "origin", BRANCH])
+    if push.returncode == 0:
+        return f"\U0001F680 Push berhasil ke origin/{BRANCH}!\nCommit: `{msg}`"
+    return (
+        f"\u274C Push gagal:\n{(push.stderr or push.stdout).strip()[-800:]}\n\n"
+        "Pastikan SSH key / credential GitHub sudah disetel di server ini."
+    )
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
+    await update.message.reply_text(
+        "Selamat datang di IMG Bot \U0001F44B\n\n"
+        "Pilih folder tujuan lalu kirim gambarnya.\n"
+        "\u2022 \U0001F5A4 Hitam-Putih \u2192 folder hitam-putih/\n"
+        "\u2022 \U0001F3A8 Coloring \u2192 folder color/\n\n"
+        "Setelah upload kamu bisa rename filenya, lihat daftar upload, "
+        "atau langsung push ke GitHub.",
+        reply_markup=menu_kb,
+    )
+    return MENU
+
+
+async def pick_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    choice = update.message.text
+    context.user_data["folder"] = str(DIR_BW) if choice == BTN_BW else str(DIR_COLOR)
+    label = "hitam-putih/" if choice == BTN_BW else "color/"
+    await update.message.reply_text(
+        f"Folder tujuan: {label}\n\nSekarang kirim gambarnya "
+        "(foto atau file/dokumen gambar).\nTekan \U0001F3E0 Menu untuk batal.",
+        reply_markup=home_kb,
+    )
+    return WAIT_IMAGE
+
+
+async def receive_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    doc = update.message.document
+    if doc is not None:
+        fname = (doc.file_name or "").lower()
+        if not (doc.mime_type or "").startswith("image/") and not fname.endswith(IMG_EXTS):
+            await update.message.reply_text(
+                "\u26D4 Itu bukan gambar. Kirim foto atau file gambar ya."
+            )
+            return WAIT_IMAGE
+        tg_file = await doc.get_file()
+        orig_name = doc.file_name or f"file_{uuid.uuid4().hex[:6]}.jpg"
+    else:
+        photo = update.message.photo[-1]
+        tg_file = await photo.get_file()
+        orig_name = f"photo_{uuid.uuid4().hex[:6]}.jpg"
+
+    TMP_DIR.mkdir(exist_ok=True)
+    tmp_path = TMP_DIR / f"{uuid.uuid4().hex}_{Path(orig_name).name}"
+    await tg_file.download_to_drive(custom_path=str(tmp_path))
+
+    context.user_data["tmp_path"] = str(tmp_path)
+    context.user_data["orig_name"] = orig_name
+
+    await update.message.reply_text(
+        f"\u2705 Gambar diterima ({fmt_size(tmp_path.stat().st_size)}).\n"
+        f"Nama file saat ini: {orig_name}\n\n"
+        "Kirim nama baru untuk file ini, atau tekan tombol di bawah "
+        "untuk memakai nama sekarang.",
+        reply_markup=ReplyKeyboardMarkup(
+            [[f"\u2714\uFE0F Pakai: {orig_name}"], [BTN_HOME]],
+            resize_keyboard=True,
+        ),
+    )
+    return WAIT_NAME
+
+
+async def save_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text
+    orig = context.user_data.get("orig_name", "")
+    tmp_path = context.user_data.get("tmp_path")
+    folder_str = context.user_data.get("folder")
+
+    if not tmp_path or not Path(tmp_path).exists():
+        await update.message.reply_text(
+            "\u26A0\uFE0F Sesi upload hangus, silakan ulangi.", reply_markup=menu_kb
+        )
+        return MENU
+
+    chosen = orig if text.startswith("\u2714\uFE0F") else text
+    chosen = sanitize_filename(chosen)
+    if not chosen:
+        await update.message.reply_text(
+            "\u26D4 Nama file tidak valid, coba nama lain."
+        )
+        return WAIT_NAME
+    chosen = ensure_ext(chosen, orig)
+
+    folder = Path(folder_str or DIR_BW)
+    folder.mkdir(exist_ok=True)
+    target = unique_path(folder, chosen)
+    shutil.move(tmp_path, target)
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        f"\U0001F4BE Tersimpan: {folder.name}/{target.name}\n\n"
+        "Mau upload lagi? Pilih folder tujuan, lihat \U0001F4CB List Upload, "
+        "atau langsung \u2B06\uFE0F Push GitHub.",
+        reply_markup=menu_kb,
+    )
+    return MENU
+
+
+async def show_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lines = []
+    total = 0
+    total_size = 0
+    for label, folder in (("hitam-putih", DIR_BW), ("color", DIR_COLOR)):
+        files = sorted(p for p in folder.glob("*") if p.is_file()) if folder.exists() else []
+        lines.append(f"\U0001F4C1 {label}/ ({len(files)} file)")
+        if not files:
+            lines.append("   \u2514 (kosong)")
+        else:
+            for i, p in enumerate(files, 1):
+                size = p.stat().st_size
+                total_size += size
+                lines.append(f"   {i}. {p.name} ({fmt_size(size)})")
+        total += len(files)
+        lines.append("")
+    lines.append(f"\U0001F5C2 Total: {total} file ({fmt_size(total_size)})")
+    await update.message.reply_text("\n".join(lines), reply_markup=menu_kb)
+    return MENU
+
+
+async def push_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    wait = await update.message.reply_text(
+        "\u23F3 Sedang push ke GitHub...", reply_markup=home_kb
+    )
+    result = await asyncio.to_thread(do_push)
+    await wait.edit_text(result, reply_markup=menu_kb, parse_mode=None)
+    return MENU
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "\u2139\uFE0F Cara pakai:\n"
+        "1. \U0001F5A4 / \U0001F3A8 pilih folder tujuan\n"
+        "2. Kirim gambar (foto atau dokumen)\n"
+        "3. Ketik nama file baru atau pakai nama bawaan\n"
+        "4. \U0001F4CB List Upload \u2192 lihat semua file\n"
+        "5. \u2B06\uFE0F Push GitHub \u2192 commit acak + push otomatis",
+        reply_markup=menu_kb,
+    )
+
+
+async def go_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop("tmp_path", None)
+    await update.message.reply_text(
+        "Kembali ke menu utama.", reply_markup=menu_kb
+    )
+    return MENU
+
+
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    tmp = context.user_data.pop("tmp_path", None)
+    if tmp and Path(tmp).exists():
+        Path(tmp).unlink(missing_ok=True)
+    await update.message.reply_text("Dibatalkan. Sampai jumpa!", reply_markup=menu_kb)
+    return MENU
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.error("Exception:", exc_info=context.error)
+
+
+def build_app() -> Application:
+    conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("start", cmd_start),
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND
+                & filters.Regex(f"^({BTN_BW}|{BTN_COLOR})$"),
+                pick_folder,
+            ),
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_LIST}$"),
+                show_list,
+            ),
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_PUSH}$"),
+                push_github,
+            ),
+        ],
+        states={
+            MENU: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND
+                    & filters.Regex(f"^({BTN_BW}|{BTN_COLOR})$"),
+                    pick_folder,
+                ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_LIST}$"),
+                    show_list,
+                ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_PUSH}$"),
+                    push_github,
+                ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_HOME}$"),
+                    go_home,
+                ),
+            ],
+            WAIT_IMAGE: [
+                MessageHandler(
+                    filters.PHOTO | filters.Document.IMAGE, receive_image
+                ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_HOME}$"),
+                    go_home,
+                ),
+            ],
+            WAIT_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, save_file),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("start", cmd_start),
+            CommandHandler("cancel", cancel_cmd),
+            CommandHandler("help", help_cmd),
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_HOME}$"),
+                go_home,
+            ),
+        ],
+        allow_reentry=True,
+    )
+
+    app = Application.builder().token(get_token()).build()
+    app.add_handler(conv)
+    app.add_error_handler(error_handler)
+    return app
+
+
+def main() -> None:
+    token = get_token()
+    if not token:
+        raise SystemExit(
+            "BOT_TOKEN tidak ditemukan.\n"
+            "Set lewat environment variable BOT_TOKEN atau file .env berisi:\n"
+            "BOT_TOKEN=123456:ABC-DEF..."
+        )
+    for d in (DIR_BW, DIR_COLOR, TMP_DIR):
+        d.mkdir(exist_ok=True)
+    for leftover in TMP_DIR.glob("*"):
+        leftover.unlink(missing_ok=True)
+
+    log.info("Bot mulai berjalan (folder: %s)", BASE)
+    build_app().run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram IMG Bot (hitam-putih / color uploader)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/img
+ExecStart=/usr/bin/python3 /root/img/bot.py
+Restart=always
+RestartSec=5
+Environment=BOT_TOKEN=GANTI_DENGAN_TOKEN_BOT_KAMU
+Environment=GIT_BRANCH=main
+
+[Install]
+WantedBy=multi-user.target
