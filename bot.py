@@ -221,8 +221,8 @@ async def view_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def gen_commit_msg() -> str:
     w1 = random.choice(COMMIT_WORDS)
-    w2 = "".join(random.choices(string.ascii_lowercase, k=6))
-    return f"{w1}-img-{w2}"
+    w2 = "".join(random.choices(string.ascii_lowercase, k=random.randint(6, 7)))
+    return f"{w1}_{w2}"
 
 
 def rand_token(k: int = 5) -> str:
@@ -315,13 +315,19 @@ def do_push() -> str:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     await update.message.reply_text(
-        "Selamat datang di IMG Bot \U0001F44B\n\n"
-        "Pilih folder tujuan lalu kirim gambarnya.\n"
-        "\u2022 \U0001F5A4 Hitam-Putih \u2192 folder hitam-putih/\n"
-        "\u2022 \U0001F3A8 Coloring \u2192 folder color/\n\n"
-        "Setelah upload kamu bisa rename filenya, lihat \U0001F4CB List Upload, "
-        "\U0001F441\uFE0F Lihat View (gambar + URL GitHub + tombol salin), "
-        "atau langsung \u2B06\uFE0F Push ke GitHub.",
+        "\U0001F5BC <b>IMG BOT</b> \U0001F44B\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+        "\U0001F4C2 <b>Upload Gambar</b>\n"
+        "\u2022 \U0001F5A4 Hitam-Putih \u2192 <code>hitam-putih/</code>\n"
+        "\u2022 \U0001F3A8 Coloring \u2192 <code>color/</code>\n"
+        "<i>Nama file bebas, ekstensi otomatis menyesuaikan.\n"
+        "Contoh: ketik</i> <code>1</code> <i>\u2192 tersimpan</i> <code>1_color.png</code>\n\n"
+        "\u26A1 <b>Fitur</b>\n"
+        "\U0001F4CB List Upload \u2014 daftar semua file\n"
+        "\U0001F441\uFE0F Lihat View \u2014 gambar + URL GitHub + tombol salin\n"
+        "\u2B06\uFE0F Push GitHub \u2014 commit acak + push otomatis\n\n"
+        "\U0001F4A1 Ketik /help untuk panduan lengkap.",
+        parse_mode="HTML",
         reply_markup=menu_kb,
     )
     return MENU
