@@ -12,9 +12,16 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from telegram import ReplyKeyboardMarkup, Update
+from telegram import (
+    CopyTextButton,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -33,18 +40,20 @@ MENU, WAIT_IMAGE, WAIT_NAME = range(3)
 BTN_BW = "\U0001F5A4 Hitam-Putih"
 BTN_COLOR = "\U0001F3A8 Coloring"
 BTN_LIST = "\U0001F4CB List Upload"
+BTN_VIEW = "\U0001F441\uFE0F Lihat View"
 BTN_PUSH = "\u2B06\uFE0F Push GitHub"
 BTN_HOME = "\U0001F3E0 Menu"
 
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic")
 
 COMMIT_WORDS = [
-    "update", "tambah", "sync", "refresh", "upload",
-    "perbarui", "rapiin", "revisi", "simpan", "backup",
+    "sketsa", "coloring", "hitamputih", "gambar", "lukisan",
+    "upload", "update", "sync", "rapiin", "simpan",
+    "backup", "revisi", "tambah", "perbarui",
 ]
 
 menu_kb = ReplyKeyboardMarkup(
-    [[BTN_BW, BTN_COLOR], [BTN_LIST, BTN_PUSH], [BTN_HOME]],
+    [[BTN_BW, BTN_COLOR], [BTN_LIST, BTN_VIEW], [BTN_PUSH], [BTN_HOME]],
     resize_keyboard=True,
 )
 home_kb = ReplyKeyboardMarkup([[BTN_HOME]], resize_keyboard=True)
@@ -106,18 +115,137 @@ def unique_path(folder: Path, filename: str) -> Path:
     return folder / f"{stem}-{uuid.uuid4().hex[:6]}{suffix}"
 
 
+def list_files_in(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.glob("*") if p.is_file()) if folder.exists() else []
+
+
+def github_urls(kind: str, name: str) -> tuple[str, str]:
+    slug = get_repo_slug()
+    sub = "color" if kind == "color" else "hitam-putih"
+    web = f"https://github.com/{slug}/blob/{BRANCH}/{sub}/{name}"
+    raw = f"https://raw.githubusercontent.com/{slug}/{BRANCH}/{sub}/{name}"
+    return web, raw
+
+
+def build_view_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for kind, folder in (("bw", DIR_BW), ("color", DIR_COLOR)):
+        files = list_files_in(folder)
+        for idx, p in enumerate(files):
+            label = f"{folder.name}/{p.name}"
+            if len(label) > 40:
+                label = label[:37] + "..."
+            rows.append(
+                [InlineKeyboardButton(text=label, callback_data=f"view|{kind}|{idx}")]
+            )
+    if not rows:
+        return None
+    return InlineKeyboardMarkup(rows)
+
+
+async def show_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    kb = build_view_keyboard()
+    if kb is None:
+        await update.message.reply_text(
+            "\U0001F4C2 Belum ada gambar terupload. "
+            "Upload dulu lewat \U0001F5A4 Hitam-Putih atau \U0001F3A8 Coloring.",
+            reply_markup=menu_kb,
+        )
+        return MENU
+    total = sum(len(r) for r in kb.inline_keyboard)
+    await update.message.reply_text(
+        f"\U0001F441\uFE0F Pilih gambar untuk melihat view ({total} file).\n"
+        "URL GitHub aktif setelah gambar di-push.",
+        reply_markup=kb,
+    )
+    return MENU
+
+
+async def view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    try:
+        _, kind, idx = query.data.split("|")
+        idx = int(idx)
+        folder = DIR_COLOR if kind == "color" else DIR_BW
+        path = list_files_in(folder)[idx]
+    except (ValueError, IndexError):
+        await query.answer("File tidak ditemukan, coba buka menu lagi.", show_alert=True)
+        return
+
+    await query.answer()
+    web_url, raw_url = github_urls(kind, path.name)
+    caption = (
+        f"\U0001F5BC {path.name}\n\n"
+        f"\U0001F517 Full view:\n{web_url}\n\n"
+        f"\U0001F4CB Raw URL:\n{raw_url}"
+    )
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(text="\U0001F517 Lihat Full View", url=web_url)],
+            [
+                InlineKeyboardButton(
+                    text="\U0001F4CB Salin URL",
+                    copy_text=CopyTextButton(text=raw_url),
+                )
+            ],
+            [InlineKeyboardButton(text="\u2B05\uFE0F Kembali", callback_data="viewback")],
+        ]
+    )
+    with open(path, "rb") as fh:
+        try:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id, photo=fh, caption=caption, reply_markup=kb
+            )
+        except Exception:
+            fh.seek(0)
+            await context.bot.send_document(
+                chat_id=query.message.chat_id, document=fh, caption=caption, reply_markup=kb
+            )
+
+
+async def view_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    kb = build_view_keyboard()
+    if kb is None:
+        await query.edit_message_text("Folder kosong.")
+        return
+    await query.edit_message_reply_markup(reply_markup=None)
+    total = sum(len(r) for r in kb.inline_keyboard)
+    await context.bot.send_message(
+        query.message.chat_id,
+        f"\U0001F441\uFE0F Pilih gambar untuk melihat view ({total} file).",
+        reply_markup=kb,
+    )
+
+
 def gen_commit_msg() -> str:
     w1 = random.choice(COMMIT_WORDS)
-    w2 = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    w2 = "".join(random.choices(string.ascii_lowercase, k=6))
     return f"{w1}-img-{w2}"
 
 
-def apply_tag(filename: str, kind: str) -> str:
+def rand_token(k: int = 5) -> str:
+    return "".join(random.choices(string.ascii_lowercase, k=k))
+
+
+def build_target(folder: Path, chosen: str, kind: str) -> Path:
     tag = "_color" if kind == "color" else "_blackwhite"
-    p = Path(filename)
-    if p.stem.lower().endswith(tag):
-        return filename
-    return f"{p.stem}{tag}{p.suffix}"
+    p = Path(chosen)
+
+    def name_with(mid: str = "") -> str:
+        return f"{p.stem}{mid}{tag}{p.suffix}"
+
+    target = folder / name_with()
+    while target.exists():
+        target = folder / name_with(f"_{rand_token()}")
+    return target
+
+
+def get_repo_slug() -> str:
+    url = run_git(["config", "--get", "remote.origin.url"]).stdout.strip()
+    m = re.search(r"[:/]([\w.\-]+)/([\w.\-]+?)(?:\.git)?/?$", url)
+    return f"{m.group(1)}/{m.group(2)}" if m else ""
 
 
 GIT_TIMEOUT = 180
@@ -191,8 +319,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Pilih folder tujuan lalu kirim gambarnya.\n"
         "\u2022 \U0001F5A4 Hitam-Putih \u2192 folder hitam-putih/\n"
         "\u2022 \U0001F3A8 Coloring \u2192 folder color/\n\n"
-        "Setelah upload kamu bisa rename filenya, lihat daftar upload, "
-        "atau langsung push ke GitHub.",
+        "Setelah upload kamu bisa rename filenya, lihat \U0001F4CB List Upload, "
+        "\U0001F441\uFE0F Lihat View (gambar + URL GitHub + tombol salin), "
+        "atau langsung \u2B06\uFE0F Push ke GitHub.",
         reply_markup=menu_kb,
     )
     return MENU
@@ -272,11 +401,10 @@ async def save_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return WAIT_NAME
     chosen = ensure_ext(chosen, orig)
-    chosen = apply_tag(chosen, context.user_data.get("kind", "bw"))
 
     folder = Path(folder_str or DIR_BW)
     folder.mkdir(exist_ok=True)
-    target = unique_path(folder, chosen)
+    target = build_target(folder, chosen, context.user_data.get("kind", "bw"))
     shutil.move(tmp_path, target)
     context.user_data.clear()
 
@@ -336,8 +464,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "1. \U0001F5A4 / \U0001F3A8 pilih folder tujuan\n"
         "2. Kirim gambar (foto atau dokumen)\n"
         "3. Ketik nama file baru atau pakai nama bawaan\n"
+        "   (otomatis jadi nama_color.png / nama_blackwhite.jpg)\n"
+        "   (nama duplikat otomatis diberi acak: 1_xkzpq_color.png)\n"
         "4. \U0001F4CB List Upload \u2192 lihat semua file\n"
-        "5. \u2B06\uFE0F Push GitHub \u2192 commit acak + push otomatis",
+        "5. \U0001F441\uFE0F Lihat View \u2192 gambar + URL GitHub + tombol salin\n"
+        "6. \u2B06\uFE0F Push GitHub \u2192 commit acak + push otomatis",
         reply_markup=menu_kb,
     )
 
@@ -376,6 +507,10 @@ def build_app() -> Application:
                 show_list,
             ),
             MessageHandler(
+                filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_VIEW}$"),
+                show_view,
+            ),
+            MessageHandler(
                 filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_PUSH}$"),
                 push_github,
             ),
@@ -390,6 +525,10 @@ def build_app() -> Application:
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_LIST}$"),
                     show_list,
+                ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_VIEW}$"),
+                    show_view,
                 ),
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND & filters.Regex(f"^{BTN_PUSH}$"),
@@ -427,6 +566,8 @@ def build_app() -> Application:
 
     app = Application.builder().token(get_token()).build()
     app.add_handler(conv)
+    app.add_handler(CallbackQueryHandler(view_callback, pattern=r"^view\|"))
+    app.add_handler(CallbackQueryHandler(view_back, pattern=r"^viewback$"))
     app.add_error_handler(error_handler)
     return app
 
