@@ -46,18 +46,7 @@ BTN_HOME = "\U0001F3E0 Menu"
 
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic")
 
-COMMIT_WORDS = [
-    "sketsa", "coloring", "gambar", "foto", "lukisan", "abstrak",
-    "senja", "pelangi", "kucing", "bintang", "bulan", "matahari",
-    "awan", "laut", "gunung", "hutan", "bunga", "daun", "kopi",
-    "teh", "roti", "pagi", "siang", "malam", "mimpi", "cerita",
-    "lagu", "musik", "puisi", "jalan", "kota", "desa", "rumah",
-    "sekolah", "pasar", "kereta", "kapal", "pesawat", "sepeda",
-    "motor", "mobil", "hujan", "angin", "pantai", "sawah", "api",
-    "air", "tanah", "langit", "kayu", "batu", "kertas", "tinta",
-    "update", "sync", "backup", "refresh", "upload", "simpan",
-    "rapiin", "revisi", "tambah", "perbarui",
-]
+COMMIT_WORDS = ["coloring", "sketsa"]
 
 menu_kb = ReplyKeyboardMarkup(
     [[BTN_BW, BTN_COLOR], [BTN_LIST, BTN_VIEW], [BTN_PUSH], [BTN_HOME]],
