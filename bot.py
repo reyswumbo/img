@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import random
@@ -111,8 +112,39 @@ def gen_commit_msg() -> str:
     return f"{w1}-img-{w2}"
 
 
+def apply_tag(filename: str, kind: str) -> str:
+    tag = "_color" if kind == "color" else "_blackwhite"
+    p = Path(filename)
+    if p.stem.lower().endswith(tag):
+        return filename
+    return f"{p.stem}{tag}{p.suffix}"
+
+
+GIT_TIMEOUT = 180
+
+
 def run_git(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=BASE, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["GIT_SSH_COMMAND"] = (
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+    )
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=BASE,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args, 124, "", f"timeout: perintah lebih dari {GIT_TIMEOUT} detik"
+        )
+
+
+def code_block(text: str, limit: int = 1500) -> str:
+    return f"<pre>{html.escape(text.strip()[-limit:])}</pre>"
 
 
 def do_push() -> str:
@@ -123,13 +155,32 @@ def do_push() -> str:
     msg = gen_commit_msg()
     commit = run_git(["commit", "-m", msg])
     if commit.returncode != 0:
-        return f"\u274C Commit gagal:\n{commit.stderr.strip()[-800:]}"
+        return f"\u274C Commit gagal:\n{code_block(commit.stderr)}"
     push = run_git(["push", "origin", BRANCH])
-    if push.returncode == 0:
-        return f"\U0001F680 Push berhasil ke origin/{BRANCH}!\nCommit: `{msg}`"
+    if push.returncode != 0:
+        err = (push.stderr or push.stdout).strip()
+        return (
+            f"\u274C Push gagal:\n{code_block(err)}\n\n"
+            "Pastikan SSH key GitHub tersedia di server ini."
+        )
+
+    head = run_git(["log", "-1", "--pretty=format:%h%n%s%n%ci"]).stdout.splitlines()
+    sha, subj, date = head[0], head[1], head[2]
+    shortstat = run_git(["show", "--shortstat", "--format="]).stdout.strip()
+    files = run_git(
+        ["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"]
+    ).stdout.strip()
+
+    info = (
+        f"commit  : {sha}\n"
+        f"pesan   : {subj}\n"
+        f"waktu   : {date}\n"
+        f"{shortstat or '(detail tidak tersedia)'}\n"
+        f"\n--- file berubah ---\n{files}"
+    )
     return (
-        f"\u274C Push gagal:\n{(push.stderr or push.stdout).strip()[-800:]}\n\n"
-        "Pastikan SSH key / credential GitHub sudah disetel di server ini."
+        f"\U0001F680 <b>Push berhasil ke origin/{BRANCH}</b>\n\n"
+        f"{code_block(info)}"
     )
 
 
@@ -149,8 +200,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def pick_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     choice = update.message.text
-    context.user_data["folder"] = str(DIR_BW) if choice == BTN_BW else str(DIR_COLOR)
-    label = "hitam-putih/" if choice == BTN_BW else "color/"
+    if choice == BTN_BW:
+        context.user_data["folder"] = str(DIR_BW)
+        context.user_data["kind"] = "bw"
+        label = "hitam-putih/"
+    else:
+        context.user_data["folder"] = str(DIR_COLOR)
+        context.user_data["kind"] = "color"
+        label = "color/"
     await update.message.reply_text(
         f"Folder tujuan: {label}\n\nSekarang kirim gambarnya "
         "(foto atau file/dokumen gambar).\nTekan \U0001F3E0 Menu untuk batal.",
@@ -215,6 +272,7 @@ async def save_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return WAIT_NAME
     chosen = ensure_ext(chosen, orig)
+    chosen = apply_tag(chosen, context.user_data.get("kind", "bw"))
 
     folder = Path(folder_str or DIR_BW)
     folder.mkdir(exist_ok=True)
@@ -256,8 +314,19 @@ async def push_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     wait = await update.message.reply_text(
         "\u23F3 Sedang push ke GitHub...", reply_markup=home_kb
     )
-    result = await asyncio.to_thread(do_push)
-    await wait.edit_text(result, reply_markup=menu_kb, parse_mode=None)
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(do_push), timeout=GIT_TIMEOUT + 30
+        )
+    except Exception as e:
+        result = f"\u274C Terjadi kesalahan: {html.escape(str(e))}"
+    try:
+        await wait.delete()
+    except Exception:
+        pass
+    await update.message.reply_text(
+        result, parse_mode="HTML", reply_markup=menu_kb
+    )
     return MENU
 
 
