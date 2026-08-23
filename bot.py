@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import logging
 import os
@@ -123,6 +124,44 @@ def github_urls(kind: str, name: str) -> tuple[str, str]:
     return web, raw
 
 
+def fname_hash(name: str) -> str:
+    return hashlib.md5(name.encode()).hexdigest()[:6]
+
+
+def resolve_view_file(kind: str, idx: int, h: str) -> Path | None:
+    folder = DIR_COLOR if kind == "color" else DIR_BW
+    try:
+        path = list_files_in(folder)[idx]
+    except IndexError:
+        return None
+    if fname_hash(path.name) != h:
+        return None
+    return path
+
+
+def view_file_keyboard(kind: str, idx: int, path: Path) -> InlineKeyboardMarkup:
+    web_url, raw_url = github_urls(kind, path.name)
+    h = fname_hash(path.name)
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(text="\U0001F517 Lihat Full View", url=web_url)],
+            [
+                InlineKeyboardButton(
+                    text="\U0001F4CB Salin URL",
+                    copy_text=CopyTextButton(text=raw_url),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="\U0001F5D1\uFE0F Hapus File",
+                    callback_data=f"del|{kind}|{idx}|{h}",
+                )
+            ],
+            [InlineKeyboardButton(text="\u2B05\uFE0F Kembali", callback_data="viewback")],
+        ]
+    )
+
+
 def build_view_keyboard() -> InlineKeyboardMarkup:
     rows = []
     for kind, folder in (("bw", DIR_BW), ("color", DIR_COLOR)):
@@ -160,12 +199,12 @@ async def show_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     try:
-        _, kind, idx = query.data.split("|")
-        idx = int(idx)
-        folder = DIR_COLOR if kind == "color" else DIR_BW
-        path = list_files_in(folder)[idx]
-    except (ValueError, IndexError):
-        await query.answer("File tidak ditemukan, coba buka menu lagi.", show_alert=True)
+        _, kind, idx, h = query.data.split("|")
+        path = resolve_view_file(kind, int(idx), h)
+    except ValueError:
+        path = None
+    if path is None:
+        await query.answer("Daftar berubah, buka \U0001F441\uFE0F Lihat View lagi.", show_alert=True)
         return
 
     await query.answer()
@@ -175,18 +214,7 @@ async def view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"\U0001F517 Full view:\n{web_url}\n\n"
         f"\U0001F4CB Raw URL:\n{raw_url}"
     )
-    kb = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton(text="\U0001F517 Lihat Full View", url=web_url)],
-            [
-                InlineKeyboardButton(
-                    text="\U0001F4CB Salin URL",
-                    copy_text=CopyTextButton(text=raw_url),
-                )
-            ],
-            [InlineKeyboardButton(text="\u2B05\uFE0F Kembali", callback_data="viewback")],
-        ]
-    )
+    kb = view_file_keyboard(kind, int(idx), path)
     with open(path, "rb") as fh:
         try:
             await context.bot.send_photo(
@@ -197,6 +225,71 @@ async def view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await context.bot.send_document(
                 chat_id=query.message.chat_id, document=fh, caption=caption, reply_markup=kb
             )
+
+
+async def del_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    _, kind, idx, h = query.data.split("|")
+    path = resolve_view_file(kind, int(idx), h)
+    if path is None:
+        await query.answer("Daftar berubah, buka \U0001F441\uFE0F Lihat View lagi.", show_alert=True)
+        return
+    await query.answer()
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="\u2705 Ya, Hapus",
+                    callback_data=f"delyes|{kind}|{idx}|{h}",
+                ),
+                InlineKeyboardButton(
+                    text="\u274C Batal",
+                    callback_data=f"delno|{kind}|{idx}|{h}",
+                ),
+            ]
+        ]
+    )
+    await query.edit_message_caption(
+        caption=f"\u26A0\uFE0F Hapus <b>{html.escape(path.name)}</b>?\n"
+        "File hilang dari GitHub setelah di-push.",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+async def del_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    _, kind, idx, h = query.data.split("|")
+    path = resolve_view_file(kind, int(idx), h)
+    if path is None:
+        await query.answer("Daftar berubah, buka \U0001F441\uFE0F Lihat View lagi.", show_alert=True)
+        return
+    await query.answer()
+    path.unlink(missing_ok=True)
+    await query.edit_message_caption(
+        caption=f"\U0001F5D1\uFE0F {path.name} dihapus dari server.\n"
+        "\u2B06\uFE0F Tekan Push GitHub agar ikut terhapus di repo.",
+        reply_markup=None,
+    )
+
+
+async def del_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    _, kind, idx, h = query.data.split("|")
+    path = resolve_view_file(kind, int(idx), h)
+    if path is None:
+        await query.answer("Daftar berubah, buka \U0001F441\uFE0F Lihat View lagi.", show_alert=True)
+        return
+    await query.answer()
+    web_url, raw_url = github_urls(kind, path.name)
+    await query.edit_message_caption(
+        caption=(
+            f"\U0001F5BC {path.name}\n\n"
+            f"\U0001F517 Full view:\n{web_url}\n\n"
+            f"\U0001F4CB Raw URL:\n{raw_url}"
+        ),
+        reply_markup=view_file_keyboard(kind, int(idx), path),
+    )
 
 
 async def view_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -332,7 +425,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Contoh: ketik</i> <code>1</code> <i>\u2192 tersimpan</i> <code>1_color.png</code>\n\n"
         "\u26A1 <b>Fitur</b>\n"
         "\U0001F4CB List Upload \u2014 daftar semua file\n"
-        "\U0001F441\uFE0F Lihat View \u2014 gambar + URL GitHub + tombol salin\n"
+        "\U0001F441\uFE0F Lihat View \u2014 gambar + URL + salin + hapus\n"
         "\u2B06\uFE0F Push GitHub \u2014 commit acak + push otomatis\n\n"
         "\U0001F4A1 Ketik /help untuk panduan lengkap.",
         parse_mode="HTML",
@@ -385,8 +478,9 @@ async def receive_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await update.message.reply_text(
         f"\u2705 Gambar diterima ({fmt_size(tmp_path.stat().st_size)}).\n"
         f"Nama file saat ini: {orig_name}\n\n"
-        "Kirim nama baru untuk file ini, atau tekan tombol di bawah "
-        "untuk memakai nama sekarang.",
+        "Kirim nama baru (contoh: <code>1</code>), ketik "
+        "<code>/n 1</code>, atau tekan tombol untuk memakai nama sekarang.",
+        parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(
             [[f"\u2714\uFE0F Pakai: {orig_name}"], [BTN_HOME]],
             resize_keyboard=True,
@@ -395,8 +489,9 @@ async def receive_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return WAIT_NAME
 
 
-async def save_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = update.message.text
+async def finalize_save(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, raw_name: str
+) -> int:
     orig = context.user_data.get("orig_name", "")
     tmp_path = context.user_data.get("tmp_path")
     folder_str = context.user_data.get("folder")
@@ -407,8 +502,7 @@ async def save_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return MENU
 
-    chosen = orig if text.startswith("\u2714\uFE0F") else text
-    chosen = sanitize_filename(chosen)
+    chosen = sanitize_filename(raw_name)
     if not chosen:
         await update.message.reply_text(
             "\u26D4 Nama file tidak valid, coba nama lain."
@@ -429,6 +523,24 @@ async def save_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         reply_markup=menu_kb,
     )
     return MENU
+
+
+async def save_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text
+    orig = context.user_data.get("orig_name", "")
+    raw = orig if text.startswith("\u2714\uFE0F") else text
+    return await finalize_save(update, context, raw)
+
+
+async def quick_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    m = re.match(r"^/n(?:\s+(\S.*))?\s*$", update.message.text.strip())
+    if not m or not m.group(1):
+        await update.message.reply_text(
+            "Format: <code>/n namafile</code>\nContoh: <code>/n 1</code>",
+            parse_mode="HTML",
+        )
+        return WAIT_NAME
+    return await finalize_save(update, context, m.group(1))
 
 
 async def show_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -477,12 +589,14 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "\u2139\uFE0F Cara pakai:\n"
         "1. \U0001F5A4 / \U0001F3A8 pilih folder tujuan\n"
         "2. Kirim gambar (foto atau dokumen)\n"
-        "3. Ketik nama file baru atau pakai nama bawaan\n"
-        "   (otomatis jadi nama_color.png / nama_blackwhite.jpg)\n"
-        "   (nama duplikat otomatis diberi acak: 1_xkzpq_color.png)\n"
+        "3. Ganti nama: ketik <code>1</code> atau <code>/n 1</code>\n"
+        "   (otomatis jadi 1_color.png / 1_blackwhite.jpg)\n"
+        "   (duplikat otomatis diberi acak: 1_xkzpq_color.png)\n"
         "4. \U0001F4CB List Upload \u2192 lihat semua file\n"
-        "5. \U0001F441\uFE0F Lihat View \u2192 gambar + URL GitHub + tombol salin\n"
+        "5. \U0001F441\uFE0F Lihat View \u2192 gambar + URL + salin + \U0001F5D1\uFE0F hapus\n"
+        "   (file terhapus hilang dari GitHub setelah push)\n"
         "6. \u2B06\uFE0F Push GitHub \u2192 commit acak + push otomatis",
+        parse_mode="HTML",
         reply_markup=menu_kb,
     )
 
@@ -563,6 +677,7 @@ def build_app() -> Application:
                 ),
             ],
             WAIT_NAME: [
+                MessageHandler(filters.Regex(r"^/n(\s|$)"), quick_name),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, save_file),
             ],
         },
@@ -581,6 +696,9 @@ def build_app() -> Application:
     app = Application.builder().token(get_token()).build()
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(view_callback, pattern=r"^view\|"))
+    app.add_handler(CallbackQueryHandler(del_confirm, pattern=r"^del\|"))
+    app.add_handler(CallbackQueryHandler(del_yes, pattern=r"^delyes\|"))
+    app.add_handler(CallbackQueryHandler(del_no, pattern=r"^delno\|"))
     app.add_handler(CallbackQueryHandler(view_back, pattern=r"^viewback$"))
     app.add_error_handler(error_handler)
     return app
