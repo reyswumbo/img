@@ -33,6 +33,7 @@ from telegram.ext import (
 BASE = Path(__file__).resolve().parent
 DIR_BW = BASE / "hitam-putih"
 DIR_COLOR = BASE / "color"
+DIR_SRC = BASE / "src"
 TMP_DIR = BASE / ".tmp_uploads"
 BRANCH = os.environ.get("GIT_BRANCH", "main")
 
@@ -40,6 +41,7 @@ MENU, WAIT_IMAGE, WAIT_NAME = range(3)
 
 BTN_BW = "\U0001F5A4 Hitam-Putih"
 BTN_COLOR = "\U0001F3A8 Coloring"
+BTN_SRC = "\U0001F4C1 Src"
 BTN_LIST = "\U0001F4CB List Upload"
 BTN_VIEW = "\U0001F441\uFE0F Lihat View"
 BTN_PUSH = "\u2B06\uFE0F Push GitHub"
@@ -50,7 +52,8 @@ IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic")
 COMMIT_WORDS = ["coloring", "sketsa"]
 
 menu_kb = ReplyKeyboardMarkup(
-    [[BTN_BW, BTN_COLOR], [BTN_LIST, BTN_VIEW], [BTN_PUSH], [BTN_HOME]],
+    [[BTN_BW, BTN_COLOR, BTN_SRC],
+     [BTN_LIST, BTN_VIEW], [BTN_PUSH], [BTN_HOME]],
     resize_keyboard=True,
 )
 home_kb = ReplyKeyboardMarkup([[BTN_HOME]], resize_keyboard=True)
@@ -118,7 +121,8 @@ def list_files_in(folder: Path) -> list[Path]:
 
 def github_urls(kind: str, name: str) -> tuple[str, str]:
     slug = get_repo_slug()
-    sub = "color" if kind == "color" else "hitam-putih"
+    subs = {"color": "color", "bw": "hitam-putih", "src": "src"}
+    sub = subs.get(kind, kind)
     web = f"https://github.com/{slug}/blob/{BRANCH}/{sub}/{name}"
     raw = f"https://raw.githubusercontent.com/{slug}/{BRANCH}/{sub}/{name}"
     return web, raw
@@ -129,7 +133,10 @@ def fname_hash(name: str) -> str:
 
 
 def resolve_view_file(kind: str, idx: int, h: str) -> Path | None:
-    folder = DIR_COLOR if kind == "color" else DIR_BW
+    folders = {"color": DIR_COLOR, "bw": DIR_BW, "src": DIR_SRC}
+    folder = folders.get(kind)
+    if folder is None:
+        return None
     try:
         path = list_files_in(folder)[idx]
     except IndexError:
@@ -164,7 +171,7 @@ def view_file_keyboard(kind: str, idx: int, path: Path) -> InlineKeyboardMarkup:
 
 def build_view_keyboard() -> InlineKeyboardMarkup:
     rows = []
-    for kind, folder in (("bw", DIR_BW), ("color", DIR_COLOR)):
+    for kind, folder in (("bw", DIR_BW), ("color", DIR_COLOR), ("src", DIR_SRC)):
         files = list_files_in(folder)
         for idx, p in enumerate(files):
             label = f"{folder.name}/{p.name}"
@@ -336,10 +343,13 @@ def rand_token(k: int = 5) -> str:
 
 
 def build_target(folder: Path, chosen: str, kind: str) -> Path:
-    tag = "_color" if kind == "color" else "_blackwhite"
+    tags = {"color": "_color", "bw": "_blackwhite"}
+    tag = tags.get(kind)
     p = Path(chosen)
 
     def name_with(mid: str = "") -> str:
+        if tag is None:
+            return f"{p.stem}{mid}{p.suffix}"
         return f"{p.stem}{mid}{tag}{p.suffix}"
 
     target = folder / name_with()
@@ -426,8 +436,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "\U0001F4C2 <b>Upload Gambar</b>\n"
         "\u2022 \U0001F5A4 Hitam-Putih \u2192 <code>hitam-putih/</code>\n"
         "\u2022 \U0001F3A8 Coloring \u2192 <code>color/</code>\n"
+        "\u2022 \U0001F4C1 Src \u2192 <code>src/</code> (bebas, tanpa suffix)\n"
         "<i>Nama file bebas, ekstensi otomatis menyesuaikan.\n"
-        "Contoh: ketik</i> <code>1</code> <i>\u2192 tersimpan</i> <code>1_color.png</code>\n\n"
+        "Contoh: ketik</i> <code>1</code> <i>\u2192 tersimpan</i> <code>1_color.png</code>\n"
+        "<i>Folder Src: ketik</i> <code>1</code> <i>\u2192 tersimpan</i> <code>1.png</code>\n\n"
         "\u26A1 <b>Fitur</b>\n"
         "\U0001F4CB List Upload \u2014 daftar semua file\n"
         "\U0001F441\uFE0F Lihat View \u2014 gambar + URL + salin + hapus\n"
@@ -445,10 +457,14 @@ async def pick_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         context.user_data["folder"] = str(DIR_BW)
         context.user_data["kind"] = "bw"
         label = "hitam-putih/"
-    else:
+    elif choice == BTN_COLOR:
         context.user_data["folder"] = str(DIR_COLOR)
         context.user_data["kind"] = "color"
         label = "color/"
+    else:
+        context.user_data["folder"] = str(DIR_SRC)
+        context.user_data["kind"] = "src"
+        label = "src/"
     await update.message.reply_text(
         f"Folder tujuan: {label}\n\nSekarang kirim gambarnya "
         "(foto atau file/dokumen gambar).\nTekan \U0001F3E0 Menu untuk batal.",
@@ -552,7 +568,7 @@ async def show_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     lines = []
     total = 0
     total_size = 0
-    for label, folder in (("hitam-putih", DIR_BW), ("color", DIR_COLOR)):
+    for label, folder in (("hitam-putih", DIR_BW), ("color", DIR_COLOR), ("src", DIR_SRC)):
         files = sorted(p for p in folder.glob("*") if p.is_file()) if folder.exists() else []
         lines.append(f"\U0001F4C1 {label}/ ({len(files)} file)")
         if not files:
@@ -632,7 +648,7 @@ def build_app() -> Application:
             CommandHandler("start", cmd_start),
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND
-                & filters.Regex(f"^({BTN_BW}|{BTN_COLOR})$"),
+                & filters.Regex(f"^({BTN_BW}|{BTN_COLOR}|{BTN_SRC})$"),
                 pick_folder,
             ),
             MessageHandler(
@@ -652,7 +668,7 @@ def build_app() -> Application:
             MENU: [
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND
-                    & filters.Regex(f"^({BTN_BW}|{BTN_COLOR})$"),
+                    & filters.Regex(f"^({BTN_BW}|{BTN_COLOR}|{BTN_SRC})$"),
                     pick_folder,
                 ),
                 MessageHandler(
@@ -717,7 +733,7 @@ def main() -> None:
             "Set lewat environment variable BOT_TOKEN, file .env berisi "
             "BOT_TOKEN=..., atau file /root/tokentelegram.txt."
         )
-    for d in (DIR_BW, DIR_COLOR, TMP_DIR):
+    for d in (DIR_BW, DIR_COLOR, DIR_SRC, TMP_DIR):
         d.mkdir(exist_ok=True)
     for leftover in TMP_DIR.glob("*"):
         leftover.unlink(missing_ok=True)
